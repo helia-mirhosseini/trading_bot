@@ -15,8 +15,7 @@ __pycache__/
 .ipynb_checkpoints/
 
 # Data & models (adjust as needed)
-data/
-*.csv
+
 *.parquet
 *.h5
 *.joblib
