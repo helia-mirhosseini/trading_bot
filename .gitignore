@@ -1,0 +1,29 @@
+# macOS / editors
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data & models (adjust as needed)
+data/
+*.csv
+*.parquet
+*.h5
+*.joblib
+*.pkl
+
+# Logs / caches
+*.log
+.cache/
+
+
