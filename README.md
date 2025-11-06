@@ -1,49 +1,208 @@
-# Cryptocurrency Trading Bot with Machine Learning
 
-This repository contains the implementation of a cryptocurrency trading bot that uses machine learning algorithms to predict the best digital currency to buy. The bot utilizes the **CoinGecko API** for real-time and historical cryptocurrency data and uses **machine learning algorithms** (like Random Forest or XGBoost) to predict price movements and make trading decisions.
+# Multi-Coin Direction Prediction with XGBoost
 
-## Table of Contents
+Predicting short-term **price direction** for multiple cryptocurrencies (Bitcoin, Ethereum, Litecoin) using a fully custom, end-to-end pipeline — from **data extraction** and **feature engineering** to **time-aware XGBoost modeling**.
 
-- [Overview](#overview)
-- [Features](#features)
-- [Requirements](#requirements)
-- [Setup](#setup)
-- [Usage](#usage)
-- [Data](#data)
-- [Model](#model)
-- [Backtesting](#backtesting)
-- [Deployment](#deployment)
-- [Contributing](#contributing)
-- [License](#license)
+---
 
-## Overview
+## 🧩 Project Overview
 
-This project provides a framework for building a **cryptocurrency trading bot** that uses machine learning to predict the best times to buy a specific cryptocurrency (e.g., Bitcoin). The bot uses historical price data and technical indicators to predict price movements (up or down) and generate buy or sell signals.
+This project builds a supervised learning pipeline to forecast whether each coin’s future cumulative return over the next *H* time steps will be **positive (up)** or **negative (down)**.
 
-The data is retrieved from the **CoinGecko API**, which provides real-time and historical market data for thousands of cryptocurrencies. The machine learning model is trained on this data to predict future price movements and create trading strategies.
+It consists of two main stages:
 
-## Features
+1. **`data_extraction_feature_engineering.ipynb`**
 
-- **Data Retrieval**: Fetches real-time and historical cryptocurrency data using the CoinGecko API.
-- **Data Preprocessing**: Cleans and processes the data for model training, including feature engineering (e.g., moving averages).
-- **Machine Learning**: Implements machine learning algorithms (Random Forest, XGBoost) to predict price movements (up or down).
-- **Backtesting**: Simulates trades on historical data to evaluate the performance of the trading strategy.
-- **Model Evaluation**: Tracks model accuracy, precision, and recall.
-- **Deployment**: Integrates with cryptocurrency exchanges (e.g., Binance, Kraken) to execute trades based on model predictions.
+   * Fetches raw historical crypto data (price, volume, etc.)
+   * Computes derived features such as moving averages, volatility, and correlations
+   * Produces a clean, lagged tabular dataset ready for modeling
 
-## Requirements
+2. **`model_training.ipynb`**
 
-Before running the bot, ensure you have the following Python packages installed:
+   * Creates direction labels (`y_btc`, `y_eth`, `y_ltc`) with no look-ahead bias
+   * Trains XGBoost models using purged walk-forward cross-validation with embargo
+   * Performs threshold tuning per fold for best precision/recall balance
+   * Outputs robust out-of-fold (OOF) metrics for honest evaluation
 
-- `requests`: To fetch data from the CoinGecko API.
-- `pandas`: For data manipulation and processing.
-- `scikit-learn`: For machine learning algorithms (Random Forest, etc.).
-- `xgboost`: For gradient boosting models.
-- `matplotlib` (optional): For visualizing the data and model results.
-- `numpy`: For numerical operations.
-- `ccxt`: For integrating with cryptocurrency exchanges (e.g., Binance, Kraken).
+---
 
-You can install the required packages using the following command:
+## 📦 Data Extraction & Feature Engineering
+
+The **dataset is entirely self-built**.
+
+### 1. Data Sources
+
+Raw time-series data for:
+
+* Bitcoin (BTC)
+* Ethereum (ETH)
+* Litecoin (LTC)
+
+Typically includes:
+
+* Price (`*_price`)
+* Trading volume (`*_volume`)
+* Returns (`*_return`)
+
+### 2. Engineered Features
+
+The feature-engineering notebook constructs dozens of useful predictors, including:
+
+| Feature Type                | Description                           | Example Columns                                |
+| --------------------------- | ------------------------------------- | ---------------------------------------------- |
+| **Log-scaled volume**       | Stabilizes variance                   | `log_bitcoin_volume`                           |
+| **Moving averages (MA)**    | Captures short- and long-term trends  | `bitcoin_ma7`, `bitcoin_ma30`                  |
+| **Volatility**              | Rolling standard deviation of returns | `bitcoin_volatility`                           |
+| **Lagged returns**          | Last known return at each timestep    | `bitcoin_return_lag1`                          |
+| **Cross-coin correlations** | Measures co-movement between assets   | `btc_eth_corr`, `btc_ltc_corr`, `ltc_eth_corr` |
+
+All features are computed using **rolling windows** and **shifted by one time step** to ensure that no future information leaks into model training.
+
+---
+
+## 🧠 Label Construction (No Leakage)
+
+Each coin’s binary target label is defined as:
+
+```
+y_coin(t) = 1  if  sum of future returns over next H steps > 0
+          = 0  otherwise
+```
+
+This captures whether the coin’s short-term direction is upward or downward.
+
+Example in code:
+
+```python
+H = 20  # lookahead horizon
+fut = df["bitcoin_return"].shift(-H).rolling(H).sum()
+df["y_btc"] = (fut > 0).astype(int)
+```
+
+---
+
+## ⚙️ Model Training
+
+### Key Steps
+
+1. **Feature Lagging**
+   Every feature is shifted by +1 step so that features at time *t* depend only on information available before time *t*.
+
+2. **Purged Walk-Forward Cross-Validation**
+
+   * Time-ordered folds (no random shuffling)
+   * An **embargo gap** between train/test folds prevents window overlap leakage
+
+3. **Early Stopping and Threshold Tuning**
+
+   * Each model stops when validation AUC stops improving
+   * Best probability threshold is chosen per fold via F1 optimization
+
+4. **Out-of-Fold Evaluation**
+   Final metrics are computed across all folds using predictions on unseen data only.
+
+---
+
+## 📈 Example Results (H = 20)
+
+| Coin    | Accuracy | ROC-AUC | Avg Precision |
+| ------- | -------- | ------- | ------------- |
+| **BTC** | 0.611    | 0.622   | 0.511         |
+| **ETH** | 0.621    | 0.675   | 0.557         |
+| **LTC** | 0.580    | 0.557   | 0.571         |
+
+These scores indicate **real predictive signal** beyond random chance, especially for Ethereum.
+Increasing `H` reduced short-term noise and improved model stability.
+
+---
+
+## 🧮 Metrics Explained
+
+| Metric                | Meaning                                |
+| --------------------- | -------------------------------------- |
+| **Accuracy**          | Fraction of correct up/down calls      |
+| **ROC-AUC**           | Ranking quality, threshold-independent |
+| **Average Precision** | Area under precision-recall curve      |
+| **F1-score**          | Trade-off between precision and recall |
+
+---
+
+## ⚡ Parameters to Tune
+
+| Parameter          | Description          | Typical Range |
+| ------------------ | -------------------- | ------------- |
+| `H`                | Lookahead horizon    | 10 – 50       |
+| `embargo`          | Gap before test fold | 20 – 100      |
+| `scale_pos_weight` | Balance class skew   | 1.0 – 2.0     |
+| `max_depth`        | Tree depth           | 5 – 7         |
+| `reg_lambda`       | L2 regularization    | 1 – 4         |
+
+---
+
+## 🧰 Requirements
+
+```
+python >= 3.9
+numpy
+pandas
+scikit-learn
+xgboost
+```
+
+Install all dependencies:
 
 ```bash
-pip install requests pandas scikit-learn xgboost matplotlib numpy ccxt
+pip install numpy pandas scikit-learn xgboost
+```
+
+---
+
+## 🚀 How to Run
+
+1. **Feature Engineering**
+
+   ```bash
+   jupyter notebook data_extraction_feature_engineering.ipynb
+   ```
+
+   Generates a cleaned dataset `df` with all engineered features.
+
+2. **Model Training**
+
+   ```bash
+   jupyter notebook model_training.ipynb
+   ```
+
+   * Adjust `H` to control forecast horizon
+   * Run all cells to train models for BTC, ETH, and LTC
+   * View printed metrics in the output cells
+
+---
+
+## 💡 Tips for Improvement
+
+* Train multiple horizons (H = 10, 20, 50) and **average probabilities** for an ensemble signal.
+* Add **trend ratios** (`ma7 / ma30`), **volatility ratios** (`vol7 / vol30`), and **time-of-day encodings**.
+* Apply **confidence filtering** — only act when `p > 0.6` or `p < 0.4`.
+* Track metrics on **rolling windows** to detect regime changes.
+
+---
+
+## 🧾 Repository Structure
+
+```
+.
+├── data_extraction_feature_engineering.ipynb   # Builds dataset & features
+├── model_training.ipynb                        # Trains and evaluates models
+├── data/                                       # Optional folder for raw data
+├── README.md                                   # This file
+```
+
+---
+
+## 🧠 License & Disclaimer
+
+This repository and dataset were built from scratch for **educational and research purposes**.
+Performance will vary by timeframe and market regime.
+No guarantee of profitability — use responsibly.
+
