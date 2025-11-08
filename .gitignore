@@ -13,9 +13,6 @@ __pycache__/
 
 # Jupyter
 .ipynb_checkpoints/
-
-# Data & models (adjust as needed)
-
 *.parquet
 *.h5
 *.joblib
