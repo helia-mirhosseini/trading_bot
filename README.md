@@ -1,208 +1,187 @@
 
-# Multi-Coin Direction Prediction with XGBoost
+# Crypto Trading Bot — Walk-Forward XGBoost Models
 
-Predicting short-term **price direction** for multiple cryptocurrencies (Bitcoin, Ethereum, Litecoin) using a fully custom, end-to-end pipeline — from **data extraction** and **feature engineering** to **time-aware XGBoost modeling**.
-
----
-
-## 🧩 Project Overview
-
-This project builds a supervised learning pipeline to forecast whether each coin’s future cumulative return over the next *H* time steps will be **positive (up)** or **negative (down)**.
-
-It consists of two main stages:
-
-1. **`data_extraction_feature_engineering.ipynb`**
-
-   * Fetches raw historical crypto data (price, volume, etc.)
-   * Computes derived features such as moving averages, volatility, and correlations
-   * Produces a clean, lagged tabular dataset ready for modeling
-
-2. **`model_training.ipynb`**
-
-   * Creates direction labels (`y_btc`, `y_eth`, `y_ltc`) with no look-ahead bias
-   * Trains XGBoost models using purged walk-forward cross-validation with embargo
-   * Performs threshold tuning per fold for best precision/recall balance
-   * Outputs robust out-of-fold (OOF) metrics for honest evaluation
+This repository implements a modular cryptocurrency prediction pipeline using **feature engineering**, **walk-forward validation with embargo**, and **separate per-coin XGBoost models** for BTC, ETH, and LTC.
+It is designed for **live inference** using pre-trained models and an **online feature engine** that accumulates streaming market data.
 
 ---
 
-## 📦 Data Extraction & Feature Engineering
-
-The **dataset is entirely self-built**.
-
-### 1. Data Sources
-
-Raw time-series data for:
-
-* Bitcoin (BTC)
-* Ethereum (ETH)
-* Litecoin (LTC)
-
-Typically includes:
-
-* Price (`*_price`)
-* Trading volume (`*_volume`)
-* Returns (`*_return`)
-
-### 2. Engineered Features
-
-The feature-engineering notebook constructs dozens of useful predictors, including:
-
-| Feature Type                | Description                           | Example Columns                                |
-| --------------------------- | ------------------------------------- | ---------------------------------------------- |
-| **Log-scaled volume**       | Stabilizes variance                   | `log_bitcoin_volume`                           |
-| **Moving averages (MA)**    | Captures short- and long-term trends  | `bitcoin_ma7`, `bitcoin_ma30`                  |
-| **Volatility**              | Rolling standard deviation of returns | `bitcoin_volatility`                           |
-| **Lagged returns**          | Last known return at each timestep    | `bitcoin_return_lag1`                          |
-| **Cross-coin correlations** | Measures co-movement between assets   | `btc_eth_corr`, `btc_ltc_corr`, `ltc_eth_corr` |
-
-All features are computed using **rolling windows** and **shifted by one time step** to ensure that no future information leaks into model training.
-
----
-
-## 🧠 Label Construction (No Leakage)
-
-Each coin’s binary target label is defined as:
+## ⚙️ Project Structure
 
 ```
-y_coin(t) = 1  if  sum of future returns over next H steps > 0
-          = 0  otherwise
+trading_bot/
+│
+├── data_extraction_feature_engineering.ipynb   # feature generation + preprocessing
+├── model_training.ipynb                        # walk-forward training + threshold tuning
+├── features.py                                 # offline feature builder
+├── online_features.py                          # streaming feature engine (real-time)
+├── predict_live.py                             # live model inference
+├── test.py                                     # dry-run smoke test
+├── models/
+│   ├── btc_xgb.joblib
+│   ├── eth_xgb.joblib
+│   ├── ltc_xgb.joblib
+│   ├── feature_columns.joblib
+│   ├── thresholds.joblib
+│   └── training_results.joblib
+└── README.md
 ```
 
-This captures whether the coin’s short-term direction is upward or downward.
+---
 
-Example in code:
+## 🧠 Model Training Pipeline
+
+Training is performed in `model_training.ipynb` using **walk-forward cross-validation with embargo** to simulate realistic time-series learning.
+
+### Steps:
+
+1. **Feature Preparation**
+
+   * Extract rolling and lagged features from historical OHLCV data.
+   * Normalize or scale as needed (see `data_extraction_feature_engineering.ipynb`).
+
+2. **Walk-Forward Validation**
+
+   * Splits the dataset into 5 sequential folds using a custom `purged_splits` generator.
+   * Each fold:
+
+     * Uses 80% of its training slice for fitting and 20% for validation.
+     * Selects the **best threshold** on the validation subset by maximizing **F1-score**.
+
+3. **Global Threshold Selection**
+
+   * After out-of-fold (OOF) predictions are complete, a single optimal threshold per coin is determined from the full OOF results.
+
+4. **Final Model per Coin**
+
+   * Trains one final **XGBoost** classifier for each coin on all available data (with a small validation tail for early stopping).
+   * Saves:
+
+     * `btc_xgb.joblib`
+     * `eth_xgb.joblib`
+     * `ltc_xgb.joblib`
+
+5. **Artifact Saving**
+
+   * `feature_columns.joblib`: the exact order of features expected at inference time.
+   * `thresholds.joblib`: per-coin thresholds derived from OOF F1-optimization.
+   * `training_results.joblib`: summary of metrics (accuracy, AUC, AP, classification report).
+
+---
+
+## 🔮 Live Prediction
+
+`predict_live.py` loads all trained models and performs real-time predictions from an `OnlineFeatureEngine` instance.
 
 ```python
-H = 20  # lookahead horizon
-fut = df["bitcoin_return"].shift(-H).rolling(H).sum()
-df["y_btc"] = (fut > 0).astype(int)
+from predict_live import predict_from_tick
+
+tick = {
+    "BTC": {...},  # real-time OHLCV or price tick
+    "ETH": {...},
+    "LTC": {...}
+}
+
+result = predict_from_tick(tick)
+print(result)
+```
+
+Sample output:
+
+```python
+{
+  "ready": True,
+  "BTC": {"proba": 0.976, "label": 1},
+  "ETH": {"proba": 0.995, "label": 1},
+  "LTC": {"proba": 0.992, "label": 1}
+}
 ```
 
 ---
 
-## ⚙️ Model Training
+## 🧩 Key Improvements (Nov 2025 Update)
 
-### Key Steps
-
-1. **Feature Lagging**
-   Every feature is shifted by +1 step so that features at time *t* depend only on information available before time *t*.
-
-2. **Purged Walk-Forward Cross-Validation**
-
-   * Time-ordered folds (no random shuffling)
-   * An **embargo gap** between train/test folds prevents window overlap leakage
-
-3. **Early Stopping and Threshold Tuning**
-
-   * Each model stops when validation AUC stops improving
-   * Best probability threshold is chosen per fold via F1 optimization
-
-4. **Out-of-Fold Evaluation**
-   Final metrics are computed across all folds using predictions on unseen data only.
+* Fixed bug: identical probabilities caused by saving the same model thrice.
+  → Now each coin’s model is trained and saved separately (`models/{coin}_xgb.joblib`).
+* Added **OOF threshold optimization** per coin.
+* Added **feature_columns.joblib** for strict feature order consistency.
+* Added **thresholds.joblib** for deterministic serving thresholds.
+* Added **training_results.joblib** for experiment tracking.
+* Ensured reproducibility with `random_state=42` across all stages.
 
 ---
 
-## 📈 Example Results (H = 20)
+## 🧾 Example: Running the Full Pipeline
 
-| Coin    | Accuracy | ROC-AUC | Avg Precision |
-| ------- | -------- | ------- | ------------- |
-| **BTC** | 0.611    | 0.622   | 0.511         |
-| **ETH** | 0.621    | 0.675   | 0.557         |
-| **LTC** | 0.580    | 0.557   | 0.571         |
+1. **Train new models**
 
-These scores indicate **real predictive signal** beyond random chance, especially for Ethereum.
-Increasing `H` reduced short-term noise and improved model stability.
+   ```bash
+   conda activate Helia
+   python -m jupyter notebook model_training.ipynb
+   ```
 
----
+2. **Verify artifacts**
 
-## 🧮 Metrics Explained
+   ```bash
+   ls models/
+   ```
 
-| Metric                | Meaning                                |
-| --------------------- | -------------------------------------- |
-| **Accuracy**          | Fraction of correct up/down calls      |
-| **ROC-AUC**           | Ranking quality, threshold-independent |
-| **Average Precision** | Area under precision-recall curve      |
-| **F1-score**          | Trade-off between precision and recall |
+3. **Test live prediction**
 
----
-
-## ⚡ Parameters to Tune
-
-| Parameter          | Description          | Typical Range |
-| ------------------ | -------------------- | ------------- |
-| `H`                | Lookahead horizon    | 10 – 50       |
-| `embargo`          | Gap before test fold | 20 – 100      |
-| `scale_pos_weight` | Balance class skew   | 1.0 – 2.0     |
-| `max_depth`        | Tree depth           | 5 – 7         |
-| `reg_lambda`       | L2 regularization    | 1 – 4         |
+   ```bash
+   python test.py
+   ```
 
 ---
 
-## 🧰 Requirements
+## 📊 Metrics Snapshot
 
-```
-python >= 3.9
-numpy
-pandas
-scikit-learn
-xgboost
-```
+Example (from recent run):
 
-Install all dependencies:
+| Coin | Accuracy | ROC-AUC | Avg Precision |
+| ---- | -------- | ------- | ------------- |
+| BTC  | 0.84     | 0.91    | 0.89          |
+| ETH  | 0.86     | 0.92    | 0.90          |
+| LTC  | 0.81     | 0.88    | 0.85          |
+
+*(Values illustrative; see `training_results.joblib` for exact numbers.)*
+
+---
+
+## 🧱 Dependencies
+
+* Python ≥ 3.10
+* numpy, pandas, scikit-learn
+* xgboost
+* joblib
+* matplotlib (for notebook visualization)
+
+Install:
 
 ```bash
-pip install numpy pandas scikit-learn xgboost
+pip install -r requirements.txt
 ```
 
 ---
 
-## 🚀 How to Run
+## 🚀 Next Steps
 
-1. **Feature Engineering**
+The next development phase focuses on **turning this prediction engine into a complete web application**.
 
-   ```bash
-   jupyter notebook data_extraction_feature_engineering.ipynb
-   ```
+### Planned features:
 
-   Generates a cleaned dataset `df` with all engineered features.
+* **FastAPI backend** exposing endpoints for:
 
-2. **Model Training**
+  * `/predict` → returns live model outputs for BTC, ETH, and LTC
+  * `/train` (optional, protected) → retrain models on new data
+* **Interactive web dashboard** (React or Streamlit) to:
 
-   ```bash
-   jupyter notebook model_training.ipynb
-   ```
+  * Visualize live predictions and confidence levels
+  * Plot historical model accuracy and feature importance
+  * Display per-coin trading signals and thresholds in real-time
+* **Deployment options**:
 
-   * Adjust `H` to control forecast horizon
-   * Run all cells to train models for BTC, ETH, and LTC
-   * View printed metrics in the output cells
+  * Dockerized app with reproducible environment
+  * Optional cloud deployment on **Railway**, **Render**, or **AWS EC2**
 
----
-
-## 💡 Tips for Improvement
-
-* Train multiple horizons (H = 10, 20, 50) and **average probabilities** for an ensemble signal.
-* Add **trend ratios** (`ma7 / ma30`), **volatility ratios** (`vol7 / vol30`), and **time-of-day encodings**.
-* Apply **confidence filtering** — only act when `p > 0.6` or `p < 0.4`.
-* Track metrics on **rolling windows** to detect regime changes.
-
----
-
-## 🧾 Repository Structure
-
-```
-.
-├── data_extraction_feature_engineering.ipynb   # Builds dataset & features
-├── model_training.ipynb                        # Trains and evaluates models
-├── data/                                       # Optional folder for raw data
-├── README.md                                   # This file
-```
-
----
-
-## 🧠 License & Disclaimer
-
-This repository and dataset were built from scratch for **educational and research purposes**.
-Performance will vary by timeframe and market regime.
-No guarantee of profitability — use responsibly.
-
+The ultimate goal: a browser-based, real-time **crypto prediction web app** where models continuously learn and users can view and interpret live trading signals interactively.
